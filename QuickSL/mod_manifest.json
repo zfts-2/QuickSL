@@ -1,0 +1,10 @@
+{
+  "id": "QuickSL",
+  "name": "Quick Save/Load (快速SL)",
+  "author": "DarkGemini",
+  "description": "在游戏房间顶栏添加 [SL] 按钮，一键保存并重载当前楼层。",
+  "version": "1.1.0",
+  "has_dll": true,
+  "has_pck": false,
+  "affects_gameplay": false
+}

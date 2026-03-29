@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>QuickSL_Setup</AssemblyName>
+    <RootNamespace>QuickSL.Installer</RootNamespace>
+
+    <!-- 单文件发布 -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <PublishTrimmed>true</PublishTrimmed>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+
+    <!-- 应用信息 -->
+    <Version>1.1.0</Version>
+    <Product>QuickSL - Slay the Spire 2 Quick Save/Load Mod</Product>
+    <Description>一键安装 QuickSL Mod 到杀戮尖塔2</Description>
+  </PropertyGroup>
+
+  <!-- 嵌入 Mod 文件为资源 -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\QuickSL\.godot\mono\temp\bin\Debug\QuickSL.dll" Link="Resources\QuickSL.dll" LogicalName="QuickSL.dll" />
+    <EmbeddedResource Include="..\QuickSL\mod_manifest.json" Link="Resources\mod_manifest.json" LogicalName="mod_manifest.json" />
+  </ItemGroup>
+
+</Project>

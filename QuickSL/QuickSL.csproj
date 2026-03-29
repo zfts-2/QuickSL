@@ -1,0 +1,74 @@
+<Project Sdk="Godot.NET.Sdk/4.4.0">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>QuickSL</RootNamespace>
+    <AssemblyName>QuickSL</AssemblyName>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+  </PropertyGroup>
+
+  <!-- ── 自动检测 Steam / 游戏路径 ── -->
+
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <SteamInstallPath>$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\SOFTWARE\Valve\Steam', 'InstallPath', '', RegistryView.Registry32, RegistryView.Registry64))</SteamInstallPath>
+    <SteamInstallPath Condition="'$(SteamInstallPath)' == ''">$([MSBuild]::GetRegistryValueFromView('HKEY_CURRENT_USER\SOFTWARE\Valve\Steam', 'SteamPath', '', RegistryView.Registry32, RegistryView.Registry64))</SteamInstallPath>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(SteamInstallPath)' == ''">
+    <SteamInstallPath Condition="Exists('C:\Program Files (x86)\Steam')">C:\Program Files (x86)\Steam</SteamInstallPath>
+    <SteamInstallPath Condition="'$(SteamInstallPath)' == '' AND Exists('D:\Steam')">D:\Steam</SteamInstallPath>
+    <SteamInstallPath Condition="'$(SteamInstallPath)' == '' AND Exists('D:\SteamLibrary')">D:\SteamLibrary</SteamInstallPath>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <GamePath Condition="Exists('$(SteamInstallPath)\steamapps\common\Slay the Spire 2')">$(SteamInstallPath)\steamapps\common\Slay the Spire 2</GamePath>
+    <GameDataPath>$(GamePath)\data_sts2_windows_x86_64</GameDataPath>
+    <ModOutputPath>$(GamePath)\mods\QuickSL</ModOutputPath>
+  </PropertyGroup>
+
+  <!--
+    如果自动检测失败，取消注释并手动设置:
+    <PropertyGroup>
+      <GamePath>C:\你的游戏路径</GamePath>
+      <GameDataPath>$(GamePath)\data_sts2_windows_x86_64</GameDataPath>
+    </PropertyGroup>
+  -->
+
+  <!-- ── 构建信息 ── -->
+
+  <Target Name="PrintPaths" BeforeTargets="Build">
+    <Message Text="[QuickSL] Steam: $(SteamInstallPath)" Importance="high" />
+    <Message Text="[QuickSL] Game:  $(GamePath)" Importance="high" />
+    <Message Text="[QuickSL] Out:   $(ModOutputPath)" Importance="high" />
+    <Warning Text="[QuickSL] ⚠ 未找到游戏！请手动设置 csproj 中的 GamePath"
+             Condition="'$(GamePath)' == '' OR !Exists('$(GamePath)')" />
+  </Target>
+
+  <!-- ── 游戏 DLL 引用 ── -->
+
+  <ItemGroup>
+    <Reference Include="sts2">
+      <HintPath>$(GameDataPath)\sts2.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(GameDataPath)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- ── 构建后自动部署 ── -->
+
+  <Target Name="CopyToMods" AfterTargets="Build" Condition="Exists('$(GamePath)')">
+    <MakeDir Directories="$(ModOutputPath)" />
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(ModOutputPath)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="mod_manifest.json" DestinationFolder="$(ModOutputPath)" SkipUnchangedFiles="true" Condition="Exists('mod_manifest.json')" />
+    <Message Text="[QuickSL] ✅ 已部署到 $(ModOutputPath)" Importance="high" />
+  </Target>
+
+</Project>

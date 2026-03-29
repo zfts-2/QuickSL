@@ -1,0 +1,25 @@
+# Build outputs
+bin/
+obj/
+publish/
+.godot/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Artifacts
+*.exe
+*.dll
+*.pdb
+
+# Agents (local workflow configs)
+.agents/
