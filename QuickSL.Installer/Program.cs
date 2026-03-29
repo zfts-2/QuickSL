@@ -11,7 +11,7 @@ class Program
     const string GameName = "Slay the Spire 2";
     const string ModName = "QuickSL";
     const string DisplayName = "Quick Save/Load (快速SL)";
-    const string Version = "1.1.0";
+    const string Version = "1.3.0";
 
     static readonly string[] ModFiles = { "QuickSL.dll", "mod_manifest.json" };
 

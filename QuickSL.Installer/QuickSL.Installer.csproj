@@ -17,7 +17,7 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
 
     <!-- 应用信息 -->
-    <Version>1.1.0</Version>
+    <Version>1.3.0</Version>
     <Product>QuickSL - Slay the Spire 2 Quick Save/Load Mod</Product>
     <Description>一键安装 QuickSL Mod 到杀戮尖塔2</Description>
   </PropertyGroup>
