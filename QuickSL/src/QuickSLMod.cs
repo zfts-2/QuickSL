@@ -2,24 +2,27 @@ using Godot;
 using HarmonyLib;
 using System;
 using System.Reflection;
-using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Runs;
 
 namespace QuickSL;
 
-[ModInitializer("Initialize")]
+/// <summary>
+/// QuickSL 核心入口。
+/// 直接注入模式：由 Patcher 在 NGame._Ready() 中插入 Initialize() 调用。
+/// 不经过游戏 Mod 系统，存档走原版路径，Steam Cloud 完美同步。
+/// </summary>
 public static class QuickSLMod
 {
     public const string ModId = "com.typnosis.quicksl";
-    public const string Version = "1.3.0";
+    public const string Version = "2.0.0";
 
     // ── SL 状态 ──
     public static bool AutoContinuePending { get; set; }
     public static bool IsMultiplayerSL { get; set; }
 
     // ── 死亡回档状态 ──
-    /// <summary>存档是否被我们拦截保留（需要清理或回档）</summary>
-    public static bool SavePreserved { get; set; }
+    /// <summary>备份的存档路径（非空表示死亡回档可用）</summary>
+    public static string? SaveBackupPath { get; set; }
 
     // ── 反射类型缓存 ──
     internal static Type? NGameType;
@@ -31,20 +34,26 @@ public static class QuickSLMod
     internal static Type? RunSaveManagerType;
     internal static Type? NGameOverScreenType;
 
+    // ── 防重入标志 ──
+    private static bool _initialized = false;
+
     public static void Initialize()
     {
-        GD.Print($"[QuickSL] v{Version} 初始化...");
+        if (_initialized) return;
+        _initialized = true;
+
+        GD.Print($"[QuickSL] v{Version} 初始化（直接注入模式）...");
         try
         {
             var harmony = new Harmony(ModId);
             harmony.PatchAll(typeof(QuickSLMod).Assembly);
             ResolveTypes();
-            PatchDeleteCurrentRun(harmony);
+            PatchSaveAndManagers(harmony);
 
             if (Engine.GetMainLoop() is SceneTree tree)
                 tree.Root.CallDeferred("add_child", new QuickSLHandler { Name = "QuickSLHandler" });
 
-            GD.Print("[QuickSL] ✅ 初始化完成");
+            GD.Print("[QuickSL] ✅ 初始化完成（直接注入模式，存档走原版路径）");
         }
         catch (Exception ex)
         {
@@ -73,77 +82,76 @@ public static class QuickSLMod
         }
     }
 
-    // ── Harmony: 拦截 DeleteCurrentRun ──────────────────────────
+    // ── Harmony: 在删除前备份存档 ───────────────────────────────
 
-    static void PatchDeleteCurrentRun(Harmony harmony)
+    static void PatchSaveAndManagers(Harmony harmony)
     {
-        if (RunSaveManagerType == null)
+        // Hook 删除存档
+        if (RunSaveManagerType != null)
         {
-            GD.PrintErr("[QuickSL] RunSaveManagerType 未找到，死亡回档不可用");
-            return;
-        }
-
-        var prefix = typeof(QuickSLMod).GetMethod(nameof(DeleteCurrentRunPrefix),
-            BindingFlags.NonPublic | BindingFlags.Static);
-
-        foreach (var name in new[] { "DeleteCurrentRun", "DeleteCurrentMultiplayerRun" })
-        {
-            var target = RunSaveManagerType.GetMethod(name,
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (target != null)
+            var prefixDel = typeof(QuickSLMod).GetMethod(nameof(BackupBeforeDelete), BindingFlags.NonPublic | BindingFlags.Static);
+            foreach (var name in new[] { "DeleteCurrentRun", "DeleteCurrentMultiplayerRun" })
             {
-                harmony.Patch(target, prefix: new HarmonyMethod(prefix));
-                GD.Print($"[QuickSL] ✅ Hooked {name}");
+                var target = RunSaveManagerType.GetMethod(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (target != null && prefixDel != null)
+                    harmony.Patch(target, prefix: new HarmonyMethod(prefixDel));
             }
         }
     }
 
     /// <summary>
-    /// Harmony Prefix: 单人死亡时阻止存档删除，让用户在 Game Over 画面选择回档。
-    /// 多人模式 / 主动放弃 / 非 GameOver → 正常删除。
+    /// Harmony Prefix: 在游戏删除存档之前，备份一份。
+    /// 让游戏正常删除（return true），这样正常死亡流程不受影响。
+    /// 只有用户点 superSL 时才恢复备份。
     /// </summary>
-    static bool DeleteCurrentRunPrefix()
+    public static bool AllowDelete = false;
+    public static object? SavedRunSaveManager = null;
+
+    static bool BackupBeforeDelete(object __instance)
     {
         try
         {
+            if (AllowDelete) return true; // 允许手动触发的删除
+
             var rm = RunManager.Instance;
             if (rm == null) return true;
 
-            // 多人 → 不拦截
             if (IsMultiplayer()) return true;
+            if (IsVictory()) return true;
 
-            // 主动放弃 → 不拦截
             var abandoned = rm.GetType().GetProperty("IsAbandoned",
                 BindingFlags.Public | BindingFlags.Instance)?.GetValue(rm);
             if (abandoned is true) return true;
 
-            // 非 GameOver → 不拦截
-            var gameOver = rm.GetType().GetProperty("IsGameOver",
-                BindingFlags.Public | BindingFlags.Instance)?.GetValue(rm);
-            if (gameOver is not true) return true;
+            // 存下 RunSaveManager 实例，方便我们后续如果接受死亡再调用
+            SavedRunSaveManager = __instance;
 
-            // ── 单人死亡：保留存档 ──
-            SavePreserved = true;
-            GD.Print("[QuickSL] 🛡️ 拦截存档删除（死亡回档可用）");
+            GD.Print("[QuickSL] 🛡️ 拦截 DeleteCurrentRun，保留存档以便由于 superSL 返回！");
+            
+            // 返回 false 拦截原生删除，这样存档和 profile 都不会被标记为死亡
             return false;
         }
         catch (Exception ex)
         {
-            GD.PrintErr($"[QuickSL] DeleteCurrentRunPrefix 异常: {ex.Message}");
+            GD.PrintErr($"[QuickSL] BackupBeforeDelete 异常: {ex.Message}");
             return true;
         }
     }
 
     // ── 死亡回档 ────────────────────────────────────────────────
 
-    /// <summary>用户在 Game Over 画面点击"回档"时调用</summary>
+    /// <summary>用户在 Game Over 画面点击 superSL 时调用</summary>
     internal static void TriggerDeathRewind(Node gameOverScreen)
     {
-        SavePreserved = false;
-        AutoContinuePending = true;
-        IsMultiplayerSL = false; // 死亡回档仅单人
+        if (SavedRunSaveManager == null)
+        {
+            GD.PrintErr("[QuickSL] 未找到绑定的 RunSaveManager，回档可能会失败！");
+        }
 
-        GD.Print("[QuickSL] 💀→🔄 死亡回档触发");
+        AutoContinuePending = true;
+        IsMultiplayerSL = false;
+
+        GD.Print("[QuickSL] 💀→🔄 拦截了删除，触发回档");
 
         if (gameOverScreen is Control ctrl)
             ctrl.Visible = false;
@@ -165,42 +173,55 @@ public static class QuickSLMod
         }
     }
 
-    /// <summary>
-    /// 清理被保留的存档（用户选择了"继续"而非"回档"时）。
-    /// 手动调用原本被跳过的 DeleteCurrentRun。
-    /// </summary>
-    internal static void CleanupPreservedSave()
-    {
-        if (!SavePreserved) return;
-        SavePreserved = false;
+    // ── 多人/通关状态判断 ─────────────────────────────────────────
 
+    public static bool IsVictory(object? gameOverScreen = null)
+    {
         try
         {
+            // 检查 RunManager 的通关标志
             var rm = RunManager.Instance;
-            if (rm == null || RunSaveManagerType == null) return;
-
-            var saveMgrProp = rm.GetType().GetProperty("RunSaveManager",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            var saveMgr = saveMgrProp?.GetValue(rm);
-            if (saveMgr == null) return;
-
-            // 直接删文件（绕过我们自己的 hook），用反射拿路径然后 File.Delete
-            var pathProp = RunSaveManagerType.GetProperty("CurrentRunSavePath",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            var path = pathProp?.GetValue(saveMgr) as string;
-            if (path != null && System.IO.File.Exists(path))
+            if (rm != null)
             {
-                System.IO.File.Delete(path);
-                GD.Print($"[QuickSL] 🗑️ 已清理保留的存档: {System.IO.Path.GetFileName(path)}");
+                foreach (var prop in rm.GetType().GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                {
+                    if ((prop.Name.Contains("Victory") || prop.Name.Contains("Won")) && prop.PropertyType == typeof(bool))
+                    {
+                        if ((bool)prop.GetValue(rm)! == true) return true;
+                    }
+                }
+                foreach (var field in rm.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                {
+                    if ((field.Name.Contains("Victory") || field.Name.Contains("Won")) && field.FieldType == typeof(bool))
+                    {
+                        if ((bool)field.GetValue(rm)! == true) return true;
+                    }
+                }
+            }
+
+            // 检查 GameOverScreen 上的通关标志
+            if (gameOverScreen != null)
+            {
+                var type = gameOverScreen.GetType();
+                foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                {
+                    if ((prop.Name.Contains("Victory") || prop.Name.Contains("Won")) && prop.PropertyType == typeof(bool))
+                    {
+                        if ((bool)prop.GetValue(gameOverScreen)! == true) return true;
+                    }
+                }
+                foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                {
+                    if ((field.Name.Contains("Victory") || field.Name.Contains("Won")) && field.FieldType == typeof(bool))
+                    {
+                        if ((bool)field.GetValue(gameOverScreen)! == true) return true;
+                    }
+                }
             }
         }
-        catch (Exception ex)
-        {
-            GD.PrintErr($"[QuickSL] 存档清理异常: {ex.Message}");
-        }
+        catch { }
+        return false;
     }
-
-    // ── 多人模式判断 ─────────────────────────────────────────
 
     public static bool IsMultiplayer()
     {
@@ -346,7 +367,8 @@ public static class QuickSLMod
     {
         AutoContinuePending = false;
         IsMultiplayerSL = false;
-        SavePreserved = false;
+        SavedRunSaveManager = null;
+        AllowDelete = false;
     }
 
     internal static string Unwrap(Exception ex)

@@ -1,22 +1,27 @@
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Win32;
+using Mono.Cecil;
+using Mono.Cecil.Cil;
 
 namespace QuickSL.Installer;
-
-enum MigrateDirection { VanillaToModded, ModdedToVanilla }
 
 class Program
 {
     const string GameName = "Slay the Spire 2";
-    const string ModName = "QuickSL";
     const string DisplayName = "Quick Save/Load (快速SL)";
-    const string Version = "1.3.0";
+    const string Version = "2.0.0";
 
-    static readonly string[] ModFiles = { "QuickSL.dll", "mod_manifest.json" };
+    // 注入目标常量
+    const string NGameTypeName = "MegaCrit.Sts2.Core.Nodes.NGame";
+    const string InjectTargetMethod = "_Ready";
+    const string QuickSLTypeName = "QuickSL.QuickSLMod";
+    const string QuickSLInitMethod = "Initialize";
 
     static string? _gamePath;
-    static string? _modDir;
+    static string? _dataDir;
 
     static void Main()
     {
@@ -56,32 +61,25 @@ class Program
             _gamePath = cwd;
         }
 
-        _modDir = Path.Combine(_gamePath, "mods", ModName);
-        bool installed = Directory.Exists(_modDir) && File.Exists(Path.Combine(_modDir, "QuickSL.dll"));
-        PrintSuccess($"  游戏目录: {_gamePath}");
-        PrintInfo(installed ? "  Mod 状态: ✅ 已安装" : "  Mod 状态: ❌ 未安装");
+        _dataDir = Path.Combine(_gamePath, "data_sts2_windows_x86_64");
         Console.WriteLine();
 
         // 主菜单
         var choice = ArrowMenu("请选择操作:", new[]
         {
-            "⚡ 安装 / 更新 Mod",
-            "⚡ 安装 / 更新 Mod（含存档迁移）",
-            "📦 迁移存档（原版 → Mod 版）",
-            "📦 迁移存档（Mod 版 → 原版）",
-            "🗑️  卸载 Mod",
+            "⚡ 安装 / 更新 QuickSL",
+            "🗑️  卸载 QuickSL",
+            "🔍 检查安装状态",
             "退出",
         });
         Console.WriteLine();
 
         switch (choice)
         {
-            case 0: Install(migrate: false); break;
-            case 1: Install(migrate: true); break;
-            case 2: DoMigrate(MigrateDirection.VanillaToModded); break;
-            case 3: DoMigrate(MigrateDirection.ModdedToVanilla); break;
-            case 4: Uninstall(); break;
-            case 5: return;
+            case 0: Install(); break;
+            case 1: Uninstall(); break;
+            case 2: CheckStatus(); break;
+            default: return;
         }
 
         Console.WriteLine();
@@ -90,155 +88,360 @@ class Program
         Console.ReadKey(true);
     }
 
-    // ── 安装 / 卸载 ─────────────────────────────────────────
+    // ── 安装 ─────────────────────────────────────────────────
 
-    static void Install(bool migrate)
+    static void Install()
     {
-        PrintHeader("安装 Mod");
-        Directory.CreateDirectory(_modDir!);
-        var asm = Assembly.GetExecutingAssembly();
+        PrintHeader("安装 QuickSL（直接注入模式）");
 
-        foreach (var file in ModFiles)
+        // 0. 自动清理旧版 Mod
+        var oldModDir = Path.Combine(_gamePath!, "mods", "QuickSL");
+        if (Directory.Exists(oldModDir))
         {
-            using var stream = asm.GetManifestResourceStream(file);
-            if (stream == null) { PrintWarning($"  ⚠ 跳过 {file}"); continue; }
-            using var fs = File.Create(Path.Combine(_modDir!, file));
-            stream.CopyTo(fs);
-            PrintSuccess($"  ✅ {file} ({stream.Length:N0} bytes)");
+            try
+            {
+                Directory.Delete(oldModDir, true);
+                PrintSuccess("  ✅ 已自动清理旧版 Mod 模式安装");
+                var modsDir = Path.Combine(_gamePath!, "mods");
+                if (Directory.Exists(modsDir) && Directory.GetFileSystemEntries(modsDir).Length == 0)
+                    Directory.Delete(modsDir);
+            }
+            catch { }
         }
-        PrintSuccess($"  已安装到: {_modDir}");
-
-        if (migrate)
+        
+        // 1. 释放 QuickSL.dll
+        PrintInfo("  步骤 1/3：释放 QuickSL.dll...");
+        var asm = Assembly.GetExecutingAssembly();
+        using (var stream = asm.GetManifestResourceStream("QuickSL.dll"))
         {
-            Console.WriteLine();
-            Migrate(MigrateDirection.VanillaToModded);
+            if (stream == null)
+            {
+                PrintError("  ❌ 安装包中未找到 QuickSL.dll");
+                return;
+            }
+            var destPath = Path.Combine(_dataDir!, "QuickSL.dll");
+            using var fs = File.Create(destPath);
+            stream.CopyTo(fs);
+            PrintSuccess($"  ✅ QuickSL.dll ({stream.Length:N0} bytes)");
+        }
+
+        // 2. 备份 sts2.dll
+        PrintInfo("  步骤 2/3：备份 sts2.dll...");
+        var sts2Path = Path.Combine(_dataDir!, "sts2.dll");
+        var backupPath = Path.Combine(_dataDir!, "sts2.dll.bak");
+        if (!File.Exists(backupPath))
+        {
+            File.Copy(sts2Path, backupPath, false);
+            PrintSuccess("  ✅ 已备份 sts2.dll → sts2.dll.bak");
+        }
+        else
+        {
+            PrintInfo("  ✓ 备份已存在，跳过");
+        }
+
+        // 3. 注入 sts2.dll
+        PrintInfo("  步骤 3/4：注入 QuickSL 到 sts2.dll...");
+        try
+        {
+            var result = PatchSts2();
+            if (result.Success)
+                PrintSuccess($"  ✅ {result.Message}");
+            else
+            {
+                PrintError($"  ❌ {result.Message}");
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            PrintError($"  ❌ 注入失败: {ex.Message}");
+            PrintInfo("  请确认游戏未在运行中。");
+            return;
+        }
+
+        // 4. 注册到 deps.json
+        PrintInfo("  步骤 4/4：注册 QuickSL 到 sts2.deps.json...");
+        try
+        {
+            var depsResult = PatchDepsJson();
+            if (depsResult.Success)
+                PrintSuccess($"  ✅ {depsResult.Message}");
+            else
+                PrintWarning($"  ⚠ {depsResult.Message}");
+        }
+        catch (Exception ex)
+        {
+            PrintWarning($"  ⚠ deps.json 修补失败: {ex.Message}（可能不影响运行）");
         }
 
         Console.WriteLine();
         PrintSuccess("  ════════════════════════════════════════");
         PrintSuccess("  安装完成！启动游戏即可使用");
-        PrintSuccess("  在游戏房间顶栏会出现 [SL] 按钮");
+        PrintSuccess("  在游戏中顶栏会出现 [SL] 按钮");
         PrintSuccess("  ════════════════════════════════════════");
     }
 
-    static void Uninstall()
+    // ── 注入逻辑 ─────────────────────────────────────────────
+
+    static (bool Success, string Message) PatchSts2()
     {
-        PrintHeader("卸载 Mod");
-        if (!Directory.Exists(_modDir!) || !File.Exists(Path.Combine(_modDir!, "QuickSL.dll")))
+        var sts2Path = Path.Combine(_dataDir!, "sts2.dll");
+        var quickslPath = Path.Combine(_dataDir!, "QuickSL.dll");
+
+        var resolver = new DefaultAssemblyResolver();
+        resolver.AddSearchDirectory(_dataDir!);
+
+        using var assembly = AssemblyDefinition.ReadAssembly(sts2Path, new ReaderParameters
         {
-            PrintInfo("  Mod 未安装，无需卸载。");
-            return;
+            ReadSymbols = false,
+            ReadWrite = true,
+            AssemblyResolver = resolver
+        });
+
+        var module = assembly.MainModule;
+
+        // 找到 NGame._Ready()
+        var nGameType = module.Types.FirstOrDefault(t => t.FullName == NGameTypeName);
+        if (nGameType == null)
+            return (false, $"未找到 {NGameTypeName}");
+
+        var readyMethod = nGameType.Methods.FirstOrDefault(m => m.Name == InjectTargetMethod);
+        if (readyMethod?.HasBody != true)
+            return (false, $"未找到 {NGameTypeName}.{InjectTargetMethod}");
+
+        // 检查是否已注入
+        if (readyMethod.Body.Instructions.Any(i =>
+            i.OpCode == OpCodes.Call &&
+            i.Operand is MethodReference mr &&
+            mr.DeclaringType.Name == "QuickSLMod" &&
+            mr.Name == QuickSLInitMethod))
+        {
+            return (true, "已经注入过，跳过注入步骤（DLL 已更新）");
         }
 
+        // 加载 QuickSL.dll 获取方法引用
+        using var quickslAssembly = AssemblyDefinition.ReadAssembly(quickslPath, new ReaderParameters
+        {
+            ReadSymbols = false,
+            AssemblyResolver = resolver
+        });
+
+        var quickslType = quickslAssembly.MainModule.Types.FirstOrDefault(t => t.FullName == QuickSLTypeName);
+        if (quickslType == null)
+            return (false, $"QuickSL.dll 中未找到 {QuickSLTypeName}");
+
+        var initMethod = quickslType.Methods.FirstOrDefault(m => m.Name == QuickSLInitMethod && m.IsStatic);
+        if (initMethod == null)
+            return (false, $"QuickSL.dll 中未找到 {QuickSLInitMethod}()");
+
+        // 导入并注入
+        var importedMethod = module.ImportReference(initMethod);
+        var il = readyMethod.Body.GetILProcessor();
+        var firstInstruction = readyMethod.Body.Instructions[0];
+        il.InsertBefore(firstInstruction, il.Create(OpCodes.Call, importedMethod));
+
+        assembly.Write();
+        return (true, "注入成功！QuickSL.Initialize() 已植入 NGame._Ready()");
+    }
+
+    static (bool Success, string Message) PatchDepsJson()
+    {
+        var depsPath = Path.Combine(_dataDir!, "sts2.deps.json");
+        var depsBackupPath = Path.Combine(_dataDir!, "sts2.deps.json.bak");
+
+        if (!File.Exists(depsPath))
+            return (false, "未找到 sts2.deps.json");
+
+        // 备份
+        if (!File.Exists(depsBackupPath))
+            File.Copy(depsPath, depsBackupPath);
+
+        var json = JsonNode.Parse(File.ReadAllText(depsPath))!;
+        var targets = json["targets"]![".NETCoreApp,Version=v9.0/win-x64"]!;
+
+        // 添加 QuickSL 作为 sts2 的依赖
+        var sts2Entry = targets["sts2/0.1.0"];
+        if (sts2Entry == null)
+            return (false, "未找到 sts2/0.1.0 条目");
+
+        var deps = sts2Entry["dependencies"]!.AsObject();
+        bool changed = false;
+
+        if (!deps.ContainsKey("QuickSL"))
+        {
+            deps.Add("QuickSL", "0.0.0.0");
+            changed = true;
+        }
+
+        // 添加 QuickSL 运行时条目
+        if (targets["QuickSL/0.0.0.0"] == null)
+        {
+            targets.AsObject().Add("QuickSL/0.0.0.0", new JsonObject
+            {
+                ["runtime"] = new JsonObject
+                {
+                    ["QuickSL.dll"] = new JsonObject()
+                }
+            });
+            changed = true;
+        }
+
+        // 添加到 libraries
+        var libraries = json["libraries"]?.AsObject();
+        if (libraries != null && !libraries.ContainsKey("QuickSL/0.0.0.0"))
+        {
+            libraries.Add("QuickSL/0.0.0.0", new JsonObject
+            {
+                ["type"] = "reference",
+                ["serviceable"] = false,
+                ["sha512"] = ""
+            });
+            changed = true;
+        }
+
+        if (!changed)
+            return (true, "deps.json 已包含 QuickSL，跳过");
+
+        var options = new JsonSerializerOptions { WriteIndented = true };
+        File.WriteAllText(depsPath, json.ToJsonString(options));
+        return (true, "QuickSL 已注册到 sts2.deps.json");
+    }
+
+    static bool IsPatched()
+    {
         try
         {
-            foreach (var file in ModFiles)
+            var sts2Path = Path.Combine(_dataDir!, "sts2.dll");
+            if (!File.Exists(sts2Path)) return false;
+
+            var resolver = new DefaultAssemblyResolver();
+            resolver.AddSearchDirectory(_dataDir!);
+
+            using var assembly = AssemblyDefinition.ReadAssembly(sts2Path, new ReaderParameters
             {
-                var path = Path.Combine(_modDir!, file);
-                if (File.Exists(path)) { File.Delete(path); PrintSuccess($"  ✅ 已删除 {file}"); }
-            }
-            if (Directory.Exists(_modDir!) && Directory.GetFileSystemEntries(_modDir!).Length == 0)
-            {
-                Directory.Delete(_modDir!);
-                PrintSuccess("  ✅ 已删除目录");
-            }
-            PrintSuccess("  卸载完成！");
-            PrintInfo("  注: 存档数据保留在 AppData 中，不受影响。");
+                ReadSymbols = false,
+                AssemblyResolver = resolver
+            });
+
+            var nGameType = assembly.MainModule.Types.FirstOrDefault(t => t.FullName == NGameTypeName);
+            var readyMethod = nGameType?.Methods.FirstOrDefault(m => m.Name == InjectTargetMethod);
+            if (readyMethod?.HasBody != true) return false;
+
+            return readyMethod.Body.Instructions.Any(i =>
+                i.OpCode == OpCodes.Call &&
+                i.Operand is MethodReference mr &&
+                mr.DeclaringType.Name == "QuickSLMod");
         }
-        catch (Exception ex)
-        {
-            PrintError($"  卸载失败: {ex.Message}");
-            PrintInfo("  请确认游戏未在运行中。");
-        }
+        catch { return false; }
     }
 
-    // ── 存档迁移 ─────────────────────────────────────────────
+    // ── 卸载 ─────────────────────────────────────────────────
 
-    static void DoMigrate(MigrateDirection dir)
+    static void Uninstall()
     {
-        var label = dir == MigrateDirection.VanillaToModded ? "原版 → Mod 版" : "Mod 版 → 原版";
-        PrintHeader($"迁移存档（{label}）");
-        PrintWarning("  ⚠ 注意: 其他 Mod 若修改了存档结构，迁移后的存档可能无法使用。");
-        PrintWarning("  ⚠ 建议迁移前确认目标环境的 Mod 兼容性。");
+        PrintHeader("卸载 QuickSL");
+
+        // 1. 恢复 sts2.dll
+        var backupPath = Path.Combine(_dataDir!, "sts2.dll.bak");
+        if (File.Exists(backupPath))
+        {
+            try
+            {
+                File.Copy(backupPath, Path.Combine(_dataDir!, "sts2.dll"), true);
+                File.Delete(backupPath);
+                PrintSuccess("  ✅ 已恢复原始 sts2.dll");
+            }
+            catch (Exception ex)
+            {
+                PrintError($"  ❌ 恢复 sts2.dll 失败: {ex.Message}");
+                PrintInfo("  请确认游戏未在运行中。");
+                return;
+            }
+        }
+        else
+        {
+            PrintWarning("  ⚠ 未找到 sts2.dll.bak，可能需要通过 Steam 验证游戏文件完整性来恢复");
+        }
+
+        // 2. 删除 QuickSL.dll
+        var quickslPath = Path.Combine(_dataDir!, "QuickSL.dll");
+        if (File.Exists(quickslPath))
+        {
+            try
+            {
+                File.Delete(quickslPath);
+                PrintSuccess("  ✅ 已删除 QuickSL.dll");
+            }
+            catch (Exception ex)
+            {
+                PrintError($"  ❌ 删除 QuickSL.dll 失败: {ex.Message}");
+            }
+        }
+
+        // 3. 恢复 deps.json
+        var depsBackup = Path.Combine(_dataDir!, "sts2.deps.json.bak");
+        if (File.Exists(depsBackup))
+        {
+            try
+            {
+                File.Copy(depsBackup, Path.Combine(_dataDir!, "sts2.deps.json"), true);
+                File.Delete(depsBackup);
+                PrintSuccess("  ✅ 已恢复原始 sts2.deps.json");
+            }
+            catch { }
+        }
+
+        PrintSuccess("  卸载完成！");
+        PrintInfo("  提示: 也可以通过 Steam 验证游戏文件完整性来恢复原始状态。");
+    }
+
+    // ── 检查状态 ──────────────────────────────────────────────
+
+    static void CheckStatus()
+    {
+        PrintHeader("安装状态检查");
         Console.WriteLine();
-        Migrate(dir);
+
+        PrintInfo($"  游戏目录:   {_gamePath}");
+        PrintInfo($"  数据目录:   {_dataDir}");
+        Console.WriteLine();
+
+        bool patched = IsPatched();
+        bool hasDll = File.Exists(Path.Combine(_dataDir!, "QuickSL.dll"));
+        bool hasBackup = File.Exists(Path.Combine(_dataDir!, "sts2.dll.bak"));
+        bool hasDepsBackup = File.Exists(Path.Combine(_dataDir!, "sts2.deps.json.bak"));
+        bool hasOldMod = Directory.Exists(Path.Combine(_gamePath!, "mods", "QuickSL"));
+
+        // 综合状态
+        if (patched && hasDll)
+            PrintSuccess("  综合状态:  ✅ 已安装（直接注入模式）");
+        else if (hasDll)
+            PrintWarning("  综合状态:  ⚠ QuickSL.dll 存在但未注入");
+        else
+            PrintError("  综合状态:  ❌ 未安装");
+
+        Console.WriteLine();
+
+        // 详细
+        PrintCheck(hasDll,         "QuickSL.dll");
+        PrintCheck(patched,        "sts2.dll 注入");
+        PrintCheck(hasDepsBackup,  "deps.json 注册");
+        PrintCheck(hasBackup,      "sts2.dll.bak 备份");
+
+        if (hasOldMod)
+        {
+            Console.WriteLine();
+            PrintWarning("  ⚠ 检测到旧版 Mod 模式安装（mods/QuickSL/）");
+            PrintInfo("    重新安装时会自动清理");
+        }
     }
 
-    static void Migrate(MigrateDirection dir)
+    static void PrintCheck(bool ok, string label)
     {
-        var savesRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "SlayTheSpire2", "steam");
-
-        if (!Directory.Exists(savesRoot)) { PrintInfo("  未找到存档目录，跳过。"); return; }
-        var userDirs = Directory.GetDirectories(savesRoot);
-        if (userDirs.Length == 0) { PrintInfo("  未找到用户存档，跳过。"); return; }
-
-        var arrow = dir == MigrateDirection.VanillaToModded ? "原版→Mod" : "Mod→原版";
-
-        foreach (var userDir in userDirs)
-        {
-            var userId = Path.GetFileName(userDir);
-            var (src, dst) = dir == MigrateDirection.VanillaToModded
-                ? (Path.Combine(userDir, "profile1", "saves"),
-                   Path.Combine(userDir, "modded", "profile1", "saves"))
-                : (Path.Combine(userDir, "modded", "profile1", "saves"),
-                   Path.Combine(userDir, "profile1", "saves"));
-
-            if (!Directory.Exists(src)) { PrintInfo($"  用户 {userId}: 无源存档，跳过。"); continue; }
-            var srcProgress = Path.Combine(src, "progress.save");
-            if (!File.Exists(srcProgress)) { PrintInfo($"  用户 {userId}: 无进度文件，跳过。"); continue; }
-
-            // 检查是否已迁移
-            var dstProgress = Path.Combine(dst, "progress.save");
-            if (File.Exists(dstProgress))
-            {
-                if (new FileInfo(dstProgress).Length >= new FileInfo(srcProgress).Length * 0.9)
-                { PrintInfo($"  用户 {userId}: 已迁移，跳过。"); continue; }
-            }
-
-            PrintInfo($"  用户 {userId}: {arrow} 迁移中...");
-            Directory.CreateDirectory(dst);
-            var dstHistory = Path.Combine(dst, "history");
-            Directory.CreateDirectory(dstHistory);
-
-            // 备份
-            if (File.Exists(dstProgress))
-            {
-                var bk = Path.Combine(dst, $"_backup_{DateTime.Now:yyyyMMdd_HHmmss}");
-                Directory.CreateDirectory(bk);
-                foreach (var f in Directory.GetFiles(dst, "*.save*"))
-                    File.Copy(f, Path.Combine(bk, Path.GetFileName(f)), true);
-                PrintInfo($"    📋 已备份现有存档");
-            }
-
-            // 复制 progress / prefs
-            int n = 0;
-            foreach (var name in new[] { "progress.save", "progress.save.backup", "prefs.save", "prefs.save.backup" })
-            {
-                var s = Path.Combine(src, name);
-                if (File.Exists(s)) { File.Copy(s, Path.Combine(dst, name), true); n++; }
-            }
-            PrintSuccess($"    ✅ {n} 个存档文件");
-
-            // 增量复制历史
-            var srcHistory = Path.Combine(src, "history");
-            if (Directory.Exists(srcHistory))
-            {
-                var existing = new HashSet<string>(
-                    Directory.Exists(dstHistory)
-                        ? Directory.GetFiles(dstHistory).Select(Path.GetFileName)!
-                        : Array.Empty<string>());
-                int r = 0;
-                foreach (var f in Directory.GetFiles(srcHistory))
-                {
-                    var fname = Path.GetFileName(f);
-                    if (!existing.Contains(fname)) { File.Copy(f, Path.Combine(dstHistory, fname)); r++; }
-                }
-                PrintSuccess($"    ✅ {r} 条历史战绩");
-            }
-        }
-        PrintSuccess("  迁移完成！");
+        Console.ForegroundColor = ok ? ConsoleColor.Green : ConsoleColor.Red;
+        Console.Write(ok ? "  ✅ " : "  ❌ ");
+        Console.ResetColor();
+        Console.WriteLine(label);
     }
 
     // ── 查找游戏 ─────────────────────────────────────────────
@@ -358,7 +561,7 @@ class Program
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine($"\n  ╔══════════════════════════════════════════════╗");
         Console.WriteLine($"  ║   ⚡ {DisplayName,-36}   ║");
-        Console.WriteLine($"  ║      v{Version} 安装管理器                     ║");
+        Console.WriteLine($"  ║      v{Version} 安装器   by typnosis   ║");
         Console.WriteLine($"  ╚══════════════════════════════════════════════╝\n");
         Console.ResetColor();
     }

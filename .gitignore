@@ -16,11 +16,13 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
-# Artifacts
+# Build artifacts
 *.exe
-*.dll
 *.pdb
+
+# Temp build logs
+build_err*.log
+build_err*.txt
 
 # Agents (local workflow configs)
 .agents/
-tutorial.md

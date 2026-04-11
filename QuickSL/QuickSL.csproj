@@ -28,7 +28,6 @@
   <PropertyGroup>
     <GamePath Condition="Exists('$(SteamInstallPath)\steamapps\common\Slay the Spire 2')">$(SteamInstallPath)\steamapps\common\Slay the Spire 2</GamePath>
     <GameDataPath>$(GamePath)\data_sts2_windows_x86_64</GameDataPath>
-    <ModOutputPath>$(GamePath)\mods\QuickSL</ModOutputPath>
   </PropertyGroup>
 
   <!--
@@ -44,7 +43,7 @@
   <Target Name="PrintPaths" BeforeTargets="Build">
     <Message Text="[QuickSL] Steam: $(SteamInstallPath)" Importance="high" />
     <Message Text="[QuickSL] Game:  $(GamePath)" Importance="high" />
-    <Message Text="[QuickSL] Out:   $(ModOutputPath)" Importance="high" />
+    <Message Text="[QuickSL] Data:  $(GameDataPath)" Importance="high" />
     <Warning Text="[QuickSL] ⚠ 未找到游戏！请手动设置 csproj 中的 GamePath"
              Condition="'$(GamePath)' == '' OR !Exists('$(GamePath)')" />
   </Target>
@@ -62,13 +61,11 @@
     </Reference>
   </ItemGroup>
 
-  <!-- ── 构建后自动部署 ── -->
+  <!-- ── 构建后自动部署到游戏 data 目录（直接注入模式） ── -->
 
-  <Target Name="CopyToMods" AfterTargets="Build" Condition="Exists('$(GamePath)')">
-    <MakeDir Directories="$(ModOutputPath)" />
-    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(ModOutputPath)" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="mod_manifest.json" DestinationFolder="$(ModOutputPath)" SkipUnchangedFiles="true" Condition="Exists('mod_manifest.json')" />
-    <Message Text="[QuickSL] ✅ 已部署到 $(ModOutputPath)" Importance="high" />
+  <Target Name="CopyToGameData" AfterTargets="Build" Condition="Exists('$(GameDataPath)')">
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(GameDataPath)" SkipUnchangedFiles="true" />
+    <Message Text="[QuickSL] ✅ 已部署 QuickSL.dll 到 $(GameDataPath)" Importance="high" />
   </Target>
 
 </Project>
