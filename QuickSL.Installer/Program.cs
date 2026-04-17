@@ -2,7 +2,6 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Microsoft.Win32;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 
@@ -12,7 +11,7 @@ class Program
 {
     const string GameName = "Slay the Spire 2";
     const string DisplayName = "Quick Save/Load (快速SL)";
-    const string Version = "2.0.0";
+    const string Version = "2.1.0";
 
     // 注入目标常量
     const string NGameTypeName = "MegaCrit.Sts2.Core.Nodes.NGame";
@@ -27,7 +26,7 @@ class Program
     {
         Console.OutputEncoding = Encoding.UTF8;
         Console.CursorVisible = false;
-        Console.Title = $"{DisplayName} v{Version}";
+        try { Console.Title = $"{DisplayName} v{Version}"; } catch { /* macOS terminal may not support */ }
 
         PrintBanner();
 
@@ -61,7 +60,12 @@ class Program
             _gamePath = cwd;
         }
 
-        _dataDir = Path.Combine(_gamePath, "data_sts2_windows_x86_64");
+        _dataDir = DetectDataDir(_gamePath);
+        if (_dataDir == null)
+        {
+            PrintError("❌ 未找到游戏 data 目录（data_sts2_*）！");
+            WaitAndExit(1); return;
+        }
         Console.WriteLine();
 
         // 主菜单
@@ -257,12 +261,20 @@ class Program
             File.Copy(depsPath, depsBackupPath);
 
         var json = JsonNode.Parse(File.ReadAllText(depsPath))!;
-        var targets = json["targets"]![".NETCoreApp,Version=v9.0/win-x64"]!;
+        // 自动检测 target key（macOS 可能有多个 target，需找包含 sts2 条目的那个）
+        var targetsObj = json["targets"]!.AsObject();
+        var targetKey = targetsObj.Select(kv => kv.Key)
+            .FirstOrDefault(k => k.Contains(".NETCoreApp") && targetsObj[k]?["sts2/0.1.0"] != null)
+            ?? targetsObj.Select(kv => kv.Key)
+            .FirstOrDefault(k => k.Contains(".NETCoreApp"));
+        if (targetKey == null)
+            return (false, "deps.json 中未找到 .NETCoreApp target");
+        var targets = targetsObj[targetKey]!;
 
         // 添加 QuickSL 作为 sts2 的依赖
         var sts2Entry = targets["sts2/0.1.0"];
         if (sts2Entry == null)
-            return (false, "未找到 sts2/0.1.0 条目");
+            return (false, $"在 target '{targetKey}' 中未找到 sts2/0.1.0 条目");
 
         var deps = sts2Entry["dependencies"]!.AsObject();
         bool changed = false;
@@ -460,30 +472,109 @@ class Program
             }
         }
 
-        foreach (var root in new[] {
-            @"C:\Program Files (x86)\Steam", @"C:\Program Files\Steam",
-            @"D:\Steam", @"E:\Steam", @"F:\Steam",
-            @"D:\SteamLibrary", @"E:\SteamLibrary", @"F:\SteamLibrary" })
+        // 平台特定的备选路径
+        var fallbacks = OperatingSystem.IsMacOS()
+            ? new[] {
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    "Library", "Application Support", "Steam") }
+            : new[] {
+                @"C:\Program Files (x86)\Steam", @"C:\Program Files\Steam",
+                @"D:\Steam", @"E:\Steam", @"F:\Steam",
+                @"D:\SteamLibrary", @"E:\SteamLibrary", @"F:\SteamLibrary" };
+
+        foreach (var root in fallbacks)
         {
             var p = Path.Combine(root, "steamapps", "common", GameName);
             if (IsGameDir(p)) return p;
+            // 也搜索 Steam Library 子目录
+            foreach (var lib in GetSteamLibraries(root))
+            {
+                p = Path.Combine(lib, "steamapps", "common", GameName);
+                if (IsGameDir(p)) return p;
+            }
         }
         return null;
     }
 
-    static bool IsGameDir(string path) =>
-        Directory.Exists(path) && (
-            File.Exists(Path.Combine(path, "data_sts2_windows_x86_64", "sts2.dll")) ||
-            File.Exists(Path.Combine(path, "SlayTheSpire2.exe")));
+    static bool IsGameDir(string path)
+    {
+        if (!Directory.Exists(path)) return false;
+        // 检查任意 data_sts2_* 目录下是否有 sts2.dll
+        if (DetectDataDir(path) != null) return true;
+        // Windows 可执行文件
+        if (File.Exists(Path.Combine(path, "SlayTheSpire2.exe"))) return true;
+        // macOS .app bundle
+        if (Directory.Exists(Path.Combine(path, "Slay the Spire 2.app"))) return true;
+        return false;
+    }
+
+    /// <summary>自动检测 data_sts2_* 目录（Windows 平铺 / macOS .app bundle）</summary>
+    static string? DetectDataDir(string gamePath)
+    {
+        if (!Directory.Exists(gamePath)) return null;
+        try
+        {
+            // 搜索路径列表：游戏根目录 + macOS .app bundle 内部
+            var searchRoots = new List<string> { gamePath };
+
+            // macOS: SlayTheSpire2.app/Contents/Resources/
+            foreach (var app in Directory.GetDirectories(gamePath, "*.app"))
+            {
+                var resources = Path.Combine(app, "Contents", "Resources");
+                if (Directory.Exists(resources))
+                    searchRoots.Add(resources);
+            }
+
+            // 优先 arm64（Apple Silicon），然后其他
+            string? fallback = null;
+            foreach (var root in searchRoots)
+            {
+                foreach (var dir in Directory.GetDirectories(root, "data_sts2_*"))
+                {
+                    if (File.Exists(Path.Combine(dir, "sts2.dll")))
+                    {
+                        if (dir.Contains("arm64"))
+                            return dir; // 优先 ARM64
+                        fallback ??= dir;
+                    }
+                }
+            }
+            return fallback;
+        }
+        catch { }
+        return null;
+    }
 
     static string? GetSteamPath()
     {
-        if (!OperatingSystem.IsWindows()) return null;
-        try { using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Valve\Steam")
-                          ?? Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\Valve\Steam");
+        // macOS
+        if (OperatingSystem.IsMacOS())
+        {
+            var macSteam = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Library", "Application Support", "Steam");
+            if (Directory.Exists(macSteam)) return macSteam;
+            return null;
+        }
+
+        // Windows: 通过注册表查找
+        if (OperatingSystem.IsWindows())
+        {
+            try { return GetSteamPathFromRegistry(); } catch { }
+        }
+        return null;
+    }
+
+    /// <summary>Windows 注册表查找 Steam 路径（仅 Windows 编译时可用）</summary>
+    static string? GetSteamPathFromRegistry()
+    {
+#if WINDOWS
+        try { using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Valve\Steam")
+                          ?? Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\Valve\Steam");
               if (k?.GetValue("InstallPath") is string p && Directory.Exists(p)) return p; } catch { }
-        try { using var k = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Valve\Steam");
+        try { using var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Valve\Steam");
               if (k?.GetValue("SteamPath") is string p && Directory.Exists(p)) return p; } catch { }
+#endif
         return null;
     }
 
@@ -548,7 +639,7 @@ class Program
                 Console.Write($"    {options[i]}");
             }
             Console.ResetColor();
-            Console.Write(new string(' ', Math.Max(0, Console.WindowWidth - Console.CursorLeft - 1)));
+            try { Console.Write(new string(' ', Math.Max(0, Console.WindowWidth - Console.CursorLeft - 1))); } catch { }
             Console.WriteLine();
         }
         Console.ResetColor();

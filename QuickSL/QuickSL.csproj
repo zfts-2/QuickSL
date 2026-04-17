@@ -19,22 +19,41 @@
     <SteamInstallPath Condition="'$(SteamInstallPath)' == ''">$([MSBuild]::GetRegistryValueFromView('HKEY_CURRENT_USER\SOFTWARE\Valve\Steam', 'SteamPath', '', RegistryView.Registry32, RegistryView.Registry64))</SteamInstallPath>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(SteamInstallPath)' == ''">
+  <PropertyGroup Condition="'$(SteamInstallPath)' == '' AND $([MSBuild]::IsOSPlatform('Windows'))">
     <SteamInstallPath Condition="Exists('C:\Program Files (x86)\Steam')">C:\Program Files (x86)\Steam</SteamInstallPath>
     <SteamInstallPath Condition="'$(SteamInstallPath)' == '' AND Exists('D:\Steam')">D:\Steam</SteamInstallPath>
     <SteamInstallPath Condition="'$(SteamInstallPath)' == '' AND Exists('D:\SteamLibrary')">D:\SteamLibrary</SteamInstallPath>
   </PropertyGroup>
 
+  <!-- macOS Steam 路径 -->
+  <PropertyGroup Condition="'$(SteamInstallPath)' == '' AND $([MSBuild]::IsOSPlatform('OSX'))">
+    <SteamInstallPath Condition="Exists('$(HOME)/Library/Application Support/Steam')">$(HOME)/Library/Application Support/Steam</SteamInstallPath>
+  </PropertyGroup>
+
   <PropertyGroup>
-    <GamePath Condition="Exists('$(SteamInstallPath)\steamapps\common\Slay the Spire 2')">$(SteamInstallPath)\steamapps\common\Slay the Spire 2</GamePath>
-    <GameDataPath>$(GamePath)\data_sts2_windows_x86_64</GameDataPath>
+    <!-- Windows 游戏路径 -->
+    <GamePath Condition="'$(GamePath)' == '' AND Exists('$(SteamInstallPath)/steamapps/common/Slay the Spire 2')">$(SteamInstallPath)/steamapps/common/Slay the Spire 2</GamePath>
+  </PropertyGroup>
+
+  <!-- 自动检测 data 目录名（Windows 平铺 / macOS .app bundle） -->
+  <PropertyGroup Condition="'$(GamePath)' != ''">
+    <!-- Windows -->
+    <GameDataPath Condition="Exists('$(GamePath)/data_sts2_windows_x86_64')">$(GamePath)/data_sts2_windows_x86_64</GameDataPath>
+    <!-- macOS .app bundle 内部 -->
+    <GameDataPath Condition="'$(GameDataPath)' == '' AND Exists('$(GamePath)/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64')">$(GamePath)/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64</GameDataPath>
+    <GameDataPath Condition="'$(GameDataPath)' == '' AND Exists('$(GamePath)/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_x86_64')">$(GamePath)/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_x86_64</GameDataPath>
+    <!-- 兼容可能的平铺结构 -->
+    <GameDataPath Condition="'$(GameDataPath)' == '' AND Exists('$(GamePath)/data_sts2_macos_arm64')">$(GamePath)/data_sts2_macos_arm64</GameDataPath>
+    <GameDataPath Condition="'$(GameDataPath)' == '' AND Exists('$(GamePath)/data_sts2_macos_x86_64')">$(GamePath)/data_sts2_macos_x86_64</GameDataPath>
+    <GameDataPath Condition="'$(GameDataPath)' == '' AND Exists('$(GamePath)/data_sts2_osx_arm64')">$(GamePath)/data_sts2_osx_arm64</GameDataPath>
+    <GameDataPath Condition="'$(GameDataPath)' == '' AND Exists('$(GamePath)/data_sts2_osx_x86_64')">$(GamePath)/data_sts2_osx_x86_64</GameDataPath>
   </PropertyGroup>
 
   <!--
     如果自动检测失败，取消注释并手动设置:
     <PropertyGroup>
-      <GamePath>C:\你的游戏路径</GamePath>
-      <GameDataPath>$(GamePath)\data_sts2_windows_x86_64</GameDataPath>
+      <GamePath>你的游戏路径</GamePath>
+      <GameDataPath>$(GamePath)/data_sts2_xxx</GameDataPath>
     </PropertyGroup>
   -->
 
@@ -52,11 +71,11 @@
 
   <ItemGroup>
     <Reference Include="sts2">
-      <HintPath>$(GameDataPath)\sts2.dll</HintPath>
+      <HintPath>$(GameDataPath)/sts2.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>$(GameDataPath)\0Harmony.dll</HintPath>
+      <HintPath>$(GameDataPath)/0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
